@@ -36,94 +36,125 @@ SOFTWARE.
 namespace mini
 {
 //----------------------------------------------------------------------------
-// Integration points
+// Node
 //----------------------------------------------------------------------------
-enum{
-  prism,
-  tet,
-  quad,
-  tri
+
+template <typename _Scalar, int _Dim>
+struct Node{
+  typedef _Scalar Scalar;
+  enum {Dim = _Dim};
+  typedef Eigen::Matrix<Scalar, Dim, 1> VectorType;
+  VectorType X;
+  VectorType u;
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+  Node(const VectorType& newX = VectorType::Zero(), 
+       const VectorType& newu = VectorType::Zero()):
+    X(newX), u(newu) {} 
+  //These two let you use the updated position.
+  VectorType getx() const {return X + u;}
+  void setx(const VectorType& x) {u = x - X;}
   };
 
+//----------------------------------------------------------------------------
+// Integration points
+//----------------------------------------------------------------------------
+
+//The IntegrationPoint is in charge of providing its natural coordinates 
+//    and weight, and to store info at their actual location. 
+template <typename _Scalar, int _Dim>
+struct IntegrationPoint{
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+  typedef _Scalar Scalar;
+  enum {Dim = _Dim};
+  typedef Eigen::Matrix<Scalar, Dim, 1> VectorType;
+  typedef Eigen::Matrix<Scalar, Dim, Dim> MatrixType;
+  IntegrationPoint(const VectorType& NaturalCoords, double _weight):
+      NatCoords(NaturalCoords), weight(_weight) {} 
+  //Storage variables
+  const VectorType NatCoords; //it's a bit wasteful to store this, but it's easier.
+  const Scalar weight;
+  VectorType X;
+  MatrixType strain;
+  MatrixType stress;
+  Scalar detj;
+};
+
+//Integration rules (most aren't implemented yet)
+enum{prism, tet, quad, tri};
+
+//Integration Rules provide sets of values to construct integration points.
 template <typename _Scalar, int type, int rule = 2>
-class GaussRule;
+struct IntegrationRule;
 
 template <typename _Scalar>
-class GaussRule<_Scalar, prism, 2>{
-public:
+struct IntegrationRule<_Scalar, prism, 2>{
   typedef _Scalar Scalar;
   enum {
     Dim = 3,
     NumPoints = 8,
     };
-  typedef Eigen::Matrix<Scalar, Dim, NumPoints> MatrixType;
+  typedef Eigen::Matrix<Scalar, Dim, 1> VectorType;
 protected:
-  MatrixType points;
+  Eigen::Matrix<Scalar, Dim, NumPoints> points;
 public:
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-  GaussRule(){
+  IntegrationRule(){
     Scalar d = 1/sqrt(3.);
     points << -d, d, d,-d,-d, d, d,-d,
               -d,-d, d, d,-d,-d, d, d,
               -d,-d,-d,-d, d, d, d, d;
     }
-  Eigen::Matrix<Scalar, Dim, 1> point(int id) const { return points.col(id); }
+  VectorType point(int id) const { return points.col(id); }
   Scalar weight() const { return 1.; }
-  };
-
-//----------------------------------------------------------------------------
-// Node
-//----------------------------------------------------------------------------
-template <typename _Scalar, int _Dim>
-class Node{
-public:
-  typedef _Scalar Scalar;
-  enum {Dim = _Dim};
-  typedef Eigen::Matrix<Scalar, Dim, 1> VectorType;
-protected:
-  VectorType _X;
-  VectorType _u;
-public:
-  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-  Node() {_u.setZero();} // <-- maybe I should change it for Node(const vec&u = vec::zero()):_u(u){}
-  Node(const VectorType& X):_X(X) { _u.setZero(); } // and here too
-  const VectorType& X() const { return _X; }
-  const VectorType& u() const { return _u; }
-  VectorType x() const {return X()+u();}
-  void setX(const VectorType& X) { _X = X; }
-  void setu(const VectorType& u) { _u = u; }
-  void setx(const VectorType& x) { _u = x - X(); }
   };
 
 //----------------------------------------------------------------------------
 // Element
 //----------------------------------------------------------------------------
+
+// Storage for vairables at a particular point. W!
+template <typename _Scalar, int _Dim>
+struct PointInfo{
+  enum {Dim = _Dim};
+  typedef _Scalar Scalar;
+  EIGEN_MAKE_ALIGNED_OPERATOR_NEW
+  Eigen::Matrix<Scalar, Dim, 1> X;
+  Eigen::Matrix<Scalar, Dim, 1> u;
+  Eigen::Matrix<Scalar, Dim, Dim> stress;
+  Eigen::Matrix<Scalar, Dim, Dim> strain;
+  Scalar elasticEnergy;
+  Scalar kineticEnergy;
+};
+  
+//Base for all elements
 template <typename _Scalar, int _Dim>
 class Element{
 public:
   typedef _Scalar Scalar;
   enum { 
       Dim = _Dim,
+      NumNodes = _Dim == 3 ? 20 : 8, //quadratic elements only
       };
-  typedef Node<Scalar, Dim> Node;
-  typedef std::array<int, Dim> ConnType;  //cpp11 W!
+  typedef Node<Scalar, Dim> NodeType;
+  typedef IntegrationPoint<Scalar, Dim> IPType;
+  typedef std::array<int, NumNodes> ConnType; 
   typedef Eigen::Matrix<Scalar, Eigen::Dynamic, 1> VectorType;
   typedef Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> MatrixType;
 protected:
   ConnType _conn;
-  const std::vector<Node>& _nodes; //global node storage. maybe I should change the name. W!
+  const std::vector<NodeType>& _nodes; //global node storage. maybe I should change the name. W!
 public:
-  Element(const std::vector<Node>& nodes): _nodes(nodes){}
-  const Node& node(int nodeNumber) const {return _nodes[_conn[nodeNumber]];}
+  Element(const std::vector<NodeType>& nodes): _nodes(nodes){}
+  virtual ~Element() {}
+  //storage
+  std::vector<IPType> ips; //integration points
+  //access to dof values and nodes
+  int Conn(int nodeNumber) const {return _conn[nodeNumber];}
+  int Dof(int dofNumber) const {return Conn(dofNumber/Dim)*Dim + dofNumber % Dim;}
+  const NodeType& Node(int nodeNumber) const {return _nodes.at(Conn(nodeNumber));}
   //set the connectivity from a container. returns true if succeeded.
-  template <typename T>
-  bool setConn(const T& conn){
-    if(conn.size() < _conn.size()) return false;
-    for(int i = 0; i<_conn.size(); i++) 
-      _conn[i] = conn[i];
-    return true;
-    }
-  virtual VectorType F() const = 0;
+  template <typename T> bool setConn(const T& conn);
+  virtual VectorType F() = 0;
   //virtual VectorType LM() const = 0;
   //virtual MatrixType K() const = 0;
   //virtual MatrixType M() const = 0;
@@ -144,20 +175,18 @@ public:
   };
   typedef Element<typename MatType::Scalar, Dim> Base;
   typedef typename Base::Scalar Scalar;
-  typedef typename Base::Node Node;
+  typedef typename Base::NodeType NodeType;
   typedef typename Base::VectorType VectorType;
   typedef typename Base::MatrixType MatrixType;
-  //typedef GaussRule<Scalar, prism, IntegrationOrder> GaussRule;
 protected:
-  static const GaussRule<Scalar, prism, IntegrationOrder> _ips; //integration points
   MatType _mat; //the material
   template <typename Derived>
-  Eigen::Matrix<Scalar, Dim, 1> _u(const Eigen::MatrixBase<Derived>& naturalCoords) const;
+  inline Eigen::Matrix<Scalar, Dim, 1> _u(const Eigen::MatrixBase<Derived>& naturalCoords) const;
   //_dhde returns the derivatives of the shape functions wrt natural coords.
   template <typename Derived>
-  Eigen::Matrix<Scalar, NumNodes, Dim> _dhde(const Eigen::MatrixBase<Derived>& naturalCoords) const;
+  inline Eigen::Matrix<Scalar, NumNodes, Dim> _dhde(const Eigen::MatrixBase<Derived>& naturalCoords) const;
 public:
-  C3D20R(const std::vector<Node>& nodes, const MatType& mat):
+  C3D20R(const std::vector<NodeType>& nodes, const MatType& mat):
       Base(nodes), _mat(mat)
     {
     EIGEN_STATIC_ASSERT(MatType::Dim == 3, YOU_MADE_A_PROGRAMMING_MISTAKE);
@@ -182,18 +211,26 @@ public:
   typedef _Scalar Scalar;
   enum {
     Dim = _Dim,
-    NumNodes = _Dim == 3 ? 20 : 8, //quadratic elements only
+    ElDim = _Dim == 3 ? 20 : 8, //quadratic elements only
     };
-  typedef Node<Scalar, Dim> Node;
-  typedef Element<Scalar, Dim> Element;
+  typedef Node<Scalar, Dim> NodeType;
+  typedef Element<Scalar, Dim> ElementType;
   typedef Eigen::Matrix<Scalar, Eigen::Dynamic, 1> VectorType;
 protected:
-  std::vector<Node> _nodes;
-  std::vector<std::unique_ptr<Element>> _elementPtrs; //cpp11
-  VectorType _f;
+  std::vector<NodeType> _nodes;
+  std::vector<std::unique_ptr<ElementType>> _elementPtrs; 
 public:
   FEM(){};
-  VectorType& F() {return _f;}
+  //Node and element access
+  int NumNodes() const {return _nodes.size();}
+  int NumElements() const {return _elementPtrs.size();}
+  const NodeType& getNode(int nodeNumber) const {return _nodes.at(nodeNumber);}
+  const ElementType& getElement(int elNumber) const {return *_elementPtrs.at(elNumber);}
+  //Update node displacements directly or using a global vector
+  void setuNode(int i, const typename NodeType::VectorType& u) {_nodes.at(i).setu(u);}
+  void setu(const VectorType& u);
+  //Obtain forces and
+  VectorType F();
   template <typename MatType>
   bool ReadAbaqusInp(const std::string& filename, const MatType& mat);
   };
@@ -287,13 +324,27 @@ bool tokenize(std::vector<T>& tokens, const std::string& line, int ignore = 0, c
     std::getline(lineStream, cell, separator);
   //split the line into tokens
   while (std::getline(lineStream, cell, separator))
-    tokens.push_back(convert<T>(cell));
-  return !lineStream && cell.empty();
+    if(cell != "\r")
+      tokens.push_back(convert<T>(cell));
+  return !lineStream && (cell.empty() || cell == "\r"); 
 }
 
 //----------------------------------------------------------------------------
 // function definitions
 //----------------------------------------------------------------------------
+
+// ---- Element ---- //
+
+template <typename _Scalar, int _Dim>
+template <typename T>
+bool Element<_Scalar, _Dim>::setConn(const T& conn){
+  if(conn.size() < _conn.size()) return false;
+  for(int i = 0; i<_conn.size(); i++) 
+    _conn.at(i) = conn.at(i);
+  return true;
+  }
+
+// ---- C3D20R ---- //
 
 template <typename MatType>
 template <typename Derived>
@@ -349,7 +400,7 @@ Eigen::Matrix<typename C3D20R<MatType>::Scalar, C3D20R<MatType>::NumNodes,C3D20R
    (1-h)*(1+r)*(1+2*g+h-r)/8., (1-g)*(1+r)*(1+g+2*h-r)/8.,-(1-g)*(1-h)*(1+g+h-2*r)/8.,
   -(1-h)*(1+r)*(1-2*g+h-r)/8., (1+g)*(1+r)*(1-g+2*h-r)/8.,-(1+g)*(1-h)*(1-g+h-2*r)/8.,
   -(1+h)*(1+r)*(1-2*g-h-r)/8.,-(1+g)*(1+r)*(1-g-2*h-r)/8.,-(1+g)*(1+h)*(1-g-h-2*r)/8.,
-   (1+h)*(1+r)*(1+2*g-h-r)/8.,-(1-g)*(1+r)*(1+g-2*h-r)/8.,-(1-g)*(1+h)*(2+g-h-2*r)/8.,
+   (1+h)*(1+r)*(1+2*g-h-r)/8.,-(1-g)*(1+r)*(1+g-2*h-r)/8.,-(1-g)*(1+h)*(1+g-h-2*r)/8.,
    ( -g)*(1-h)*(1-r)/2.,      -(1-g)*(1+g)*(1-r)/4.,      -(1-g)*(1+g)*(1-h)/4.,
    (1-h)*(1+h)*(1-r)/4.,       ( -h)*(1+g)*(1-r)/2.,      -(1-h)*(1+h)*(1+g)/4.,
    ( -g)*(1+h)*(1-r)/2.,       (1-g)*(1+g)*(1-r)/4.,      -(1-g)*(1+g)*(1+h)/4.,
@@ -366,50 +417,68 @@ Eigen::Matrix<typename C3D20R<MatType>::Scalar, C3D20R<MatType>::NumNodes,C3D20R
 }
   
 template <typename MatType>
-typename C3D20R<MatType>::VectorType C3D20R<MatType>::F() const {
-  //obtaining uIi. Note that this is the transpose of belytschkos notation
-  Eigen::Matrix<Scalar, Dim, NumNodes> u;
-  for(int i = 0; i<NumNodes; i++)
-    u.col(i) = this->node(i).u();
+typename C3D20R<MatType>::VectorType C3D20R<MatType>::F(std::vector<PointInfo>& storage) const {
+  //preparing storage for output
+  if(storage.size() < NumIPs) storage.resize(NumIPs);
   //storage for the force
   VectorType fi = VectorType::Zero(NumDofs);
   Eigen::Map<Eigen::Matrix<double,NumNodes,Dim,Eigen::RowMajor>> Fi(fi.data());
+  //obtaining uIi. Note that this is the transpose of belytschkos notation
+  Eigen::Matrix<Scalar, Dim, NumNodes> u;
+  for(int i = 0; i<NumNodes; i++)
+    u.col(i) = this->getNode(i).u();
   Eigen::Matrix3d H; //displacement gradient (not the deformation gradient)
-  Eigen::Matrix3d E; //strain
-  //Eigen::Matrix3d F;
-  //Eigen::Matrix3d S;
-  //Eigen::Matrix3d P;
+  Eigen::Matrix<Scalar, Dim, NumNodes> allX;
+  for(int i = 0; i<NumNodes; i++)
+    allX.col(i) = this->getNode(i).X();
   for (int i = 0; i<NumIPs; i++)
     {
     Eigen::Matrix<Scalar, NumNodes, Dim> dhdX;
-    Eigen::Matrix<Scalar, NumNodes, Dim> dhde = _dhde(_ips.point(i)); //could be precalculated
-    Eigen::Matrix<Scalar, Dim, NumNodes> allX;
-    for(int i = 0; i<NumNodes; i++)
-      allX.col(i) = this->node(i).X();
+    Eigen::Matrix<Scalar, NumNodes, Dim> dhde = _dhde(_ips.point(i));
     // F0e is the deformation gradient F^0_\psi between the material coords and element coords
-    Eigen::Matrix<Scalar, Dim, Dim> F0e = allX * dhde;
-    Scalar detj0 = F0e.determinant();
+    Eigen::Matrix<Scalar, Dim, Dim> F0e = allX * dhde; 
+    Scalar detj0 = F0e.determinant(); 
     //dhdX is called B^0_{Ij} by belytschko. (actually it's the transpose of this one)
     //while dhde are the same in all elements, that is not the case for dhdX.
-    dhdX = dhde * F0e.inverse();
-
+    dhdX = dhde * F0e.inverse(); //up to (including) this line everything could be precalculated
     H.noalias() = u*dhdX; //definition in Belytschko
-    E.noalias() = .5*(H + H.transpose() + H*H.transpose());
-    //Ft.noalias() = H+Eigen::Matrix2d::Identity(); //transponse of the deformation gradient
-    //S.noalias() = GetMaterial().stress(E);
-    //P.noalias() = S*Ft;
+    storage.at(i).strain.noalias() = .5*(H + H.transpose() + H*H.transpose()); //E
+    storage.at(i).stress = _mat.Stress(storage.at(i).strain); //PK2
     double k = detj0 * _ips.weight();
-    //Fi.noalias() = k*dhdX*P;
-    //Commented code above is the same as the following expression. Eigen library
-    //  optimizations make run the code faster this way.
-    Fi.noalias() += k*dhdX*_mat.Stress(E)*(H.transpose() + Eigen::Matrix3d::Identity());
+    Fi.noalias() += k*dhdX * storage.at(i).stress * (H.transpose() + Eigen::Matrix<Scalar, 3, 3>::Identity());
     }
   return fi;
   }
 
+// ------ FEM ------ //
+
+//sets u at the nodes given a global vector u with all the displacements
+template <typename _Scalar, int _Dim>
+void FEM<_Scalar, _Dim>::setu(const VectorType& u){
+  for(int i = 0; i< NumNodes(); i++)
+    setuNode(i, u.segment<Dim>(i*Dim));
+}
+
+template <typename _Scalar, int _Dim>
+typename FEM<_Scalar, _Dim>::VectorType FEM<_Scalar, _Dim>::F () {
+  int numDofs = Dim * _nodes.size();
+  VectorType f = VectorType::Zero(numDofs);
+  std::vector<typename Element::PointInfo> storage;
+  for(auto& elementPtr: _elementPtrs) 
+    {
+    VectorType fel = elementPtr->F(storage);
+    for(int i = 0; i<fel.size(); i++)
+      {
+      //if(dofId != dummy_dof)
+      f(elementPtr->getDof(i)) += fel(i);
+      }
+    }
+  return f;
+  }
+
 //This function can read the mesh from an Abaqus input file. It's a very 
 //  basic implementation so don't get too crazy about it. It blindly trusts
-//  that the connectivity matches the value of FEM::elDim.
+//  that the connectivity matches the value of FEM::NumNodes.
 //Returns true if succeeded
 template <typename _Scalar, int _Dim>
 template <typename MatType>
@@ -476,10 +545,10 @@ bool FEM<_Scalar, _Dim>::ReadAbaqusInp(const std::string& filename, const MatTyp
   //  index equals to 1.
   for(int i = 0; i<tempEls.size(); i++)
     {
-    if (tempEls[i].size() != NumNodes)
+    if (tempEls[i].size() != ElDim)
       {
       std::cerr << "Warning: Input file contains wrong connectivity size." << std::endl <<
-          "Given " << tempEls[i].size() << " values when " << NumNodes << " were expected." << std::endl;
+          "Given " << tempEls[i].size() << " values when " << ElDim << " were expected." << std::endl;
       return false;
       }
     for (int j = 0; j<tempEls[i].size(); j++)
@@ -504,7 +573,7 @@ bool FEM<_Scalar, _Dim>::ReadAbaqusInp(const std::string& filename, const MatTyp
     {
     _elementPtrs.emplace_back(new C3D20R<MatType>(_nodes, mat));
     //converting to index base 0
-    for (int j = 0; j<NumNodes; j++)
+    for (int j = 0; j<ElDim; j++)
       tempEls[i][j] -= 1;
     _elementPtrs.at(i)->setConn(tempEls[i]); //converting to index base 0
     }
