@@ -79,7 +79,7 @@ struct IntegrationPoint{
   MatrixType strain;
   MatrixType stress;
   Scalar detj;
-  //Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> dhdX; //used for precalculated data
+  Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> dhdX; //used for precalculated data
 };
 
 //Integration rule types (most aren't implemented yet)
@@ -134,7 +134,8 @@ protected:
   ConnType _conn;
   const std::vector<NodeType>& _nodes; //global node storage. maybe I should change the name. W!
 public:
-  Element(const std::vector<NodeType>& nodes): _nodes(nodes){}
+  template<typename T>
+  Element(const std::vector<NodeType>& nodes, const T& conn);
   virtual ~Element() {}
   //storage
   std::vector<IPType> ips; //integration points
@@ -142,8 +143,6 @@ public:
   int Conn(int nodeNumber) const {return _conn[nodeNumber];}
   int Dof(int dofNumber) const {return Conn(dofNumber/Dim)*Dim + dofNumber % Dim;}
   const NodeType& Node(int nodeNumber) const {return _nodes.at(Conn(nodeNumber));}
-  //set the connectivity from a container. returns true if succeeded.
-  template <typename T> bool setConn(const T& conn);
   virtual VectorType F() = 0;
   virtual VectorType LM() = 0;
   virtual MatrixType K() = 0;
@@ -171,15 +170,18 @@ public:
   typedef IntegrationRule<Scalar, prism, 2> IntegrationRule;
 protected:
   MatType _mat; //the material
-  template <typename Derived>
-  inline Eigen::Matrix<Scalar, Dim, 1> _u(const Eigen::MatrixBase<Derived>& naturalCoords) const;
   //h and _dhde return the shape functions and its derivatives wrt natural coords.
   template <typename Derived>
   inline Eigen::Matrix<Scalar, NumNodes, 1> _h(const Eigen::MatrixBase<Derived>& naturalCoords) const;
   template <typename Derived>
   inline Eigen::Matrix<Scalar, NumNodes, Dim> _dhde(const Eigen::MatrixBase<Derived>& naturalCoords) const;
+  template <typename Derived>
+  inline Eigen::Matrix<Scalar, Dim, 1> _u(const Eigen::MatrixBase<Derived>& naturalCoords) const;
+  template <typename Derived>
+  inline Eigen::Matrix<Scalar, NumNodes, Dim> _dhdX(const Eigen::MatrixBase<Derived>& naturalCoords) const;
 public:
-  C3D20R(const std::vector<NodeType>& nodes, const MatType& mat);
+  template <typename T>
+  C3D20R(const std::vector<NodeType>& nodes, const T& conn, const MatType& mat);
   virtual VectorType F();
   virtual VectorType LM();
   virtual MatrixType K();
@@ -327,18 +329,21 @@ bool tokenize(std::vector<T>& tokens, const std::string& line, int ignore = 0, c
 
 template <typename _Scalar, int _Dim>
 template <typename T>
-bool Element<_Scalar, _Dim>::setConn(const T& conn){
-  if(conn.size() < _conn.size()) return false;
+Element<_Scalar, _Dim>::Element(const std::vector<NodeType>& nodes, const T& conn):
+    _nodes(nodes)
+  {
+  assert(conn.size >= _conn.size());
   for(int i = 0; i<_conn.size(); i++) 
     _conn.at(i) = conn.at(i);
-  return true;
   }
 
 // ---- C3D20R ---- //
 
 template <typename MatType>
-C3D20R<MatType>::C3D20R(const std::vector<typename C3D20R<MatType>::NodeType>& nodes, const MatType& mat):
-    Base(nodes), _mat(mat)
+template <typename T>
+C3D20R<MatType>::C3D20R(const std::vector<typename C3D20R<MatType>::NodeType>& nodes,
+                        const T& conn, const MatType& mat):
+    Base(nodes, conn), _mat(mat)
   {
   EIGEN_STATIC_ASSERT(MatType::Dim == 3, YOU_MADE_A_PROGRAMMING_MISTAKE);
   IntegrationRule IR;
@@ -384,35 +389,12 @@ template <typename Derived>
 Eigen::Matrix<typename C3D20R<MatType>::Scalar, C3D20R<MatType>::Dim, 1>
     C3D20R<MatType>::_u(const Eigen::MatrixBase<Derived>& naturalCoords) const
   {
-  EIGEN_STATIC_ASSERT_SAME_VECTOR_SIZE(Derived, Eigen::Vector3d); //we're just checking size so any scalar type is ok.
-  Scalar g = naturalCoords(0);
-  Scalar h = naturalCoords(1);
-  Scalar r = naturalCoords(2);
-  Eigen::Matrix<Scalar, NumNodes, 1> shapeFunctions;
-  shapeFunctions << -1/8*(1-g)*(1-h)*(1-r)*(2+g+h+r),
-                    -1/8*(1+g)*(1-h)*(1-r)*(2-g+h+r),
-                    -1/8*(1+g)*(1+h)*(1-r)*(2-g-h+r),
-                    -1/8*(1-g)*(1+h)*(1-r)*(2+g-h+r),
-                    -1/8*(1-g)*(1-h)*(1+r)*(2+g+h-r),
-                    -1/8*(1+g)*(1-h)*(1+r)*(2-g+h-r),
-                    -1/8*(1+g)*(1+h)*(1+r)*(2-g-h-r),
-                    -1/8*(1-g)*(1+h)*(1+r)*(2+g-h-r),
-                    1/4*(1-g)*(1+g)*(1-h)*(1-r),
-                    1/4*(1-h)*(1+h)*(1+g)*(1-r),
-                    1/4*(1-g)*(1+g)*(1+h)*(1-r),
-                    1/4*(1-h)*(1+h)*(1-g)*(1-r),
-                    1/4*(1-g)*(1+g)*(1-h)*(1+r),
-                    1/4*(1-h)*(1+h)*(1+g)*(1+r),
-                    1/4*(1-g)*(1+g)*(1+h)*(1+r),
-                    1/4*(1-h)*(1+h)*(1-g)*(1+r),
-                    1/4*(1-r)*(1+r)*(1-g)*(1-h),
-                    1/4*(1-r)*(1+r)*(1+g)*(1-h),
-                    1/4*(1-r)*(1+r)*(1+g)*(1+h),
-                    1/4*(1-r)*(1+r)*(1-g)*(1+h);
+  EIGEN_STATIC_ASSERT_SAME_VECTOR_SIZE(Derived, Eigen::Vector3d); //Any scalar type should be ok since only size matters.
+  Eigen::Matrix<Scalar, NumNodes, 1> shapeFunctions = _h(naturalCoords);
   Eigen::Matrix<Scalar, Dim, NumNodes> allU;
   for(int i = 0; i<NumNodes; i++)
     allU.col(i) = this->node(i).u();
-  return allU * shapeFunctions;  //I need to check the best return type.
+  return allU * shapeFunctions;
 }
 
 template <typename MatType>
@@ -448,6 +430,28 @@ Eigen::Matrix<typename C3D20R<MatType>::Scalar, C3D20R<MatType>::NumNodes,C3D20R
   -(1-r)*(1+r)*(1+h)/4.,       (1-r)*(1+r)*(1-g)/4.,       ( -r)*(1-g)*(1+h)/2.;
   return dhde;
 }
+
+//W!! this function will change. Right now detj0 is discarded. We want it.
+template <typename MatType>
+template <typename Derived>
+Eigen::Matrix<typename C3D20R<MatType>::Scalar, C3D20R<MatType>::NumNodes,C3D20R<MatType>::Dim>
+    C3D20R<MatType>::_dhdX(const Eigen::MatrixBase<Derived>& naturalCoords) const
+  {
+  EIGEN_STATIC_ASSERT_SAME_VECTOR_SIZE(Derived, Eigen::Vector3d); //Any scalar type should work.
+  Eigen::Matrix<Scalar, Dim, NumNodes> allX;
+  for(int i = 0; i<NumNodes; i++)
+    allX.col(i) = this->Node(i).X;
+  Eigen::Matrix<Scalar, NumNodes, Dim> dhdX;
+  Eigen::Matrix<Scalar, NumNodes, Dim> dhde = _dhde(naturalCoords);
+  // F0e is the deformation gradient F^0_\psi between the material coords and natural coords
+  Eigen::Matrix<Scalar, Dim, Dim> F0e = allX * dhde; 
+  // detj is also between the material coords and natural coords
+  Scalar detj = F0e.determinant(); 
+  //dhdX is called B^0_{Ij} by belytschko. (actually it's the transpose of this one)
+  //while dhde are the same in all elements, that is not the case for dhdX.
+  dhdX.noalias() = dhde * F0e.inverse(); //up to (including) this line everything could be precalculated
+  return dhdX;
+  }
   
 template <typename MatType>
 typename C3D20R<MatType>::VectorType C3D20R<MatType>::F() {
@@ -484,15 +488,16 @@ typename C3D20R<MatType>::VectorType C3D20R<MatType>::F() {
 
 template <typename MatType>
 typename C3D20R<MatType>::MatrixType C3D20R<MatType>::K() {
-  //This function may or may not work. It's almost a placeholder. W!!
-
   //storage for the stiffness matrix
   MatrixType k = MatrixType::Zero(NumDofs, NumDofs);
-  Eigen::Matrix<double, 6, 24> B; B.setZero();
+  Eigen::Matrix<double, 6, NumDofs> B; B.setZero(); //W! hardcoded number
   // W! repeated code with F() here:->
   Eigen::Matrix<Scalar, Dim, NumNodes> allX;
+  Eigen::Matrix<Scalar, Dim, NumNodes> allx;
   for(int i = 0; i<NumNodes; i++)
     allX.col(i) = this->Node(i).X;
+  for(int i = 0; i<NumNodes; i++)
+    allx.col(i) = this->Node(i).getx();
   for(int i = 0; i< this->ips.size(); i++) 
     {  
     typename Base::IPType& ip = this->ips.at(i);
@@ -505,21 +510,16 @@ typename C3D20R<MatType>::MatrixType C3D20R<MatType>::K() {
     //dhdX is called B^0_{Ij} by belytschko. (actually it's the transpose of this one)
     //while dhde are the same in all elements, that is not the case for dhdX.
     dhdX.noalias() = dhde * F0e.inverse(); //up to (including) this line everything could be precalculated
-    // <--:repeated code up to here
-        
-    // The matrix B is just a container with the derivatives of h in X,Y,Z.
-    //it is not necessary, but it makes easy the calculations.
+    Eigen::Matrix<Scalar,Dim, Dim> F = allx*dhdX; //definition in Belytschko
+     // <--:repeated code up to here
+     
+    // Maybe I should just do what belytschko recommends in page 214 and write the individual terms.
     for(int i = 0;i < NumNodes; ++i) 
       {
-      B(0, 3*i)     = dhdX(i,0);   
-      B(1, 3*i + 1) = dhdX(i,1);
-      B(2, 3*i + 2) = dhdX(i,2);
-      B(3, 3*i + 1) = dhdX(i,2);
-      B(3, 3*i + 2) = dhdX(i,1);
-      B(4, 3*i)     = dhdX(i,2);
-      B(4, 3*i + 2) = dhdX(i,0);
-      B(5, 3*i)     = dhdX(i,1);
-      B(5, 3*i + 1) = dhdX(i,0);
+      B.template block<3,3>(0,i*Dim) = dhdX.row(i).asDiagonal() * F;
+      B.template block<1,3>(3,i*Dim) = dhdX(i,1) * F.col(3).transpose() + dhdX(i,2) * F.col(2).transpose();
+      B.template block<1,3>(4,i*Dim) = dhdX(i,0) * F.col(3).transpose() + dhdX(i,2) * F.col(1).transpose();
+      B.template block<1,3>(5,i*Dim) = dhdX(i,0) * F.col(2).transpose() + dhdX(i,1) * F.col(1).transpose();
       }
     // Using the next function is actually slow. 
     Eigen::Matrix<double,6,6> Cm = _mat.Stiffness(); 
@@ -533,24 +533,17 @@ typename C3D20R<MatType>::MatrixType C3D20R<MatType>::K() {
   
 template <typename MatType>
 typename C3D20R<MatType>::MatrixType C3D20R<MatType>::M() {
-  //This function may or may not work. It's almost a placeholder. W!!
-
   //storage for the stiffness matrix
   MatrixType m = MatrixType::Zero(NumDofs, NumDofs);
-  
   for(int i = 0; i<this->ips.size(); i++)
     {
     typename Base::IPType& ip = this->ips.at(i);
     Eigen::Matrix<Scalar, NumNodes, 1> h = _h(ip.natCoords);
     // The matrix H is just a container with the values of h at the ips.
-    Eigen::Matrix<double,Dim,NumDofs> H; H.setZero();
+    Eigen::Matrix<double,Dim,NumDofs> H;
     // When filling the matrix, also the zero values must be initialized.
     for(int j = 0; j < NumNodes; ++j)
-      {
-      H(0, 3*j    ) = h(j);
-      H(1, 3*j + 1) = h(j);
-      H(2, 3*j + 2) = h(j);
-      }
+      H.template block<Dim,Dim>(0, j*Dim) = h(j) * Eigen::Matrix<Scalar, Dim, Dim>::Identity();
     // The next function might not be very optimized.
     m+= H.transpose() * H * _mat.density() * ip.detj * ip.weight; 
     }
@@ -741,11 +734,10 @@ bool FEM<_Scalar, _Dim>::ReadAbaqusInp(const std::string& filename, const MatTyp
     }
   for (int i = 0; i<tempEls.size(); i++)
     {
-    _elementPtrs.emplace_back(new C3D20R<MatType>(_nodes, mat));
     //converting to index base 0
     for (int j = 0; j<ElDim; j++)
       tempEls[i][j] -= 1;
-    _elementPtrs.at(i)->setConn(tempEls[i]);
+    _elementPtrs.emplace_back(new C3D20R<MatType>(_nodes, tempEls[i], mat));
     }
   return true;
   }
