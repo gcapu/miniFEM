@@ -122,17 +122,16 @@ class Element{
 public:
   typedef _Scalar Scalar;
   enum { 
-      Dim = _Dim,
-      NumNodes = _Dim == 3 ? 20 : 8, //quadratic elements only
-      };
+    Dim = _Dim,
+    NumNodes = _Dim == 3 ? 20 : 8, //quadratic elements only. 
+    };
   typedef Node<Scalar, Dim> NodeType;
   typedef IntegrationPoint<Scalar, Dim> IPType;
-  typedef std::array<int, NumNodes> ConnType; 
   typedef Eigen::Matrix<Scalar, Eigen::Dynamic, 1> VectorType;
   typedef Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> MatrixType;
 protected:
-  ConnType _conn;
-  const std::vector<NodeType>& _nodes; //global node storage. maybe I should change the name. W!
+  const std::vector<NodeType>& _globalNodes; //reference to global node storage.
+  std::array<int, NumNodes> _connectivity;
 public:
   template<typename T>
   Element(const std::vector<NodeType>& nodes, const T& conn);
@@ -140,9 +139,9 @@ public:
   //storage
   std::vector<IPType> ips; //integration points
   //access to dof values and nodes
-  int Conn(int nodeNumber) const {return _conn[nodeNumber];}
-  int Dof(int dofNumber) const {return Conn(dofNumber/Dim)*Dim + dofNumber % Dim;}
-  const NodeType& Node(int nodeNumber) const {return _nodes.at(Conn(nodeNumber));}
+  const NodeType& Node(int nodeNumber) const {return _globalNodes.at(Conn(nodeNumber));}
+  int Conn(int nodeNumber) const {return _connectivity[nodeNumber];}
+  //main functions
   virtual VectorType F() = 0;
   virtual VectorType LM() = 0;
   virtual MatrixType K() = 0;
@@ -189,6 +188,29 @@ public:
   };
 
 //----------------------------------------------------------------------------
+// Constraints and Loads
+//----------------------------------------------------------------------------
+
+//Constraints are restrict the node dofs indicated in locked. It is applied to all 
+//  nodes with 
+template <int _Dim>
+struct Constraint{
+  enum {Dim = _Dim,};
+  std::vector<int> nodeIds; //reference to global node storage.
+  std::array<bool, Dim> locked = {true, true, true}; //by default it is an encastre
+};
+
+template <typename _Scalar, int _Dim>
+struct Load{
+  typedef _Scalar Scalar;
+  enum {Dim = _Dim,};
+  std::vector<int> nodeIds; //reference to global node storage.
+  //force is the force applied to all nodes in the list. Since it is the same 
+  //  exact value for all nodes it doesn't lead to uniform pressure (unfortunately).
+  Eigen::Matrix<Scalar, Dim, 1> force; 
+};
+
+//----------------------------------------------------------------------------
 // Finite element model
 //----------------------------------------------------------------------------
 template <typename _Scalar = double, int _Dim = 3>
@@ -200,27 +222,44 @@ public:
     ElDim = _Dim == 3 ? 20 : 8, //quadratic elements only
     };
   typedef Node<Scalar, Dim> NodeType;
+  typedef Constraint<Dim> ConstraintType;
+  typedef Load<Scalar, Dim> LoadType;
   typedef Element<Scalar, Dim> ElementType;
   typedef Eigen::Matrix<Scalar, Eigen::Dynamic, 1> VectorType;
   typedef Eigen::SparseMatrix<Scalar> MatrixType;
 protected:
   std::vector<NodeType> _nodes;
+  std::vector<ConstraintType> _constraints;
+  std::vector<LoadType> _loads;
   std::vector<std::unique_ptr<ElementType>> _elementPtrs; 
+  //_constrainedDofIds maps the unconstrained degrees of freedom to a reduced
+  //    system. Constrained dofs are indicated with negative values.
+  std::vector<int> _reducedDofIds; 
+  //unconstrained size is the number of free degrees of freedom.
+  int _numFreeDofs; 
+  void UpdateReduced();
+  //GetElementReducedDofIds provides the reduced dof ids corresponding to its dofs.
+  std::vector<int> GetElementReducedDofIds(int elementId) const;
 public:
   FEM(){};
-  //Node and element access
+  //Access info
+  int NumDofs() const {return _nodes.size()*Dim;}
+  int NumFreeDofs() const {return _numFreeDofs;}
   int NumNodes() const {return _nodes.size();}
   int NumElements() const {return _elementPtrs.size();}
-  const NodeType& Node(int nodeNumber) const {return _nodes.at(nodeNumber);}
   const ElementType& Element(int elNumber) const {return *_elementPtrs.at(elNumber);} //W! might change to IP access
+  const NodeType& Node(int nodeNumber) const {return _nodes.at(nodeNumber);}
   //Update node displacements directly or using a global vector
-  void setuNode(int i, const typename NodeType::VectorType& u) {_nodes.at(i).u = u;}
+  void setuNode(int nodeNumber, const typename NodeType::VectorType& u) {_nodes.at(nodeNumber).u = u;}
   void setu(const VectorType& u);
   //Obtain forces and
   VectorType F();
   VectorType LM();
   MatrixType K();
   MatrixType M();
+  //feature creation
+  bool CreateConstraint(const ConstraintType& constraint);
+  bool CreateLoad(const LoadType& load);
   template <typename MatType>
   bool ReadAbaqusInp(const std::string& filename, const MatType& mat);
   };
@@ -330,13 +369,13 @@ bool tokenize(std::vector<T>& tokens, const std::string& line, int ignore = 0, c
 template <typename _Scalar, int _Dim>
 template <typename T>
 Element<_Scalar, _Dim>::Element(const std::vector<NodeType>& nodes, const T& conn):
-    _nodes(nodes)
+    _globalNodes(nodes)
   {
-  assert(conn.size >= _conn.size());
-  for(int i = 0; i<_conn.size(); i++) 
-    _conn.at(i) = conn.at(i);
+  assert(conn.size() >= _connectivity.size());
+  for(int i = 0; i<_connectivity.size(); i++) 
+    _connectivity.at(i) = conn.at(i);
   }
-
+  
 // ---- C3D20R ---- //
 
 template <typename MatType>
@@ -488,6 +527,8 @@ typename C3D20R<MatType>::VectorType C3D20R<MatType>::F() {
 
 template <typename MatType>
 typename C3D20R<MatType>::MatrixType C3D20R<MatType>::K() {
+  //W!!! TODO: add the geometric part of the stiffness. 
+  
   //storage for the stiffness matrix
   MatrixType k = MatrixType::Zero(NumDofs, NumDofs);
   Eigen::Matrix<double, 6, NumDofs> B; B.setZero(); //W! hardcoded number
@@ -512,7 +553,6 @@ typename C3D20R<MatType>::MatrixType C3D20R<MatType>::K() {
     dhdX.noalias() = dhde * F0e.inverse(); //up to (including) this line everything could be precalculated
     Eigen::Matrix<Scalar,Dim, Dim> F = allx*dhdX; //definition in Belytschko
      // <--:repeated code up to here
-     
     // Maybe I should just do what belytschko recommends in page 214 and write the individual terms.
     for(int i = 0;i < NumNodes; ++i) 
       {
@@ -563,6 +603,34 @@ typename C3D20R<MatType>::VectorType C3D20R<MatType>::LM() {
   }
 
 // ------ FEM ------ //
+
+//Private method! Updates the _constrainedDofIds. 
+template <typename _Scalar, int _Dim>
+void FEM<_Scalar, _Dim>::UpdateReduced(){
+  //filling with the default values
+  if(_reducedDofIds.size() != NumDofs())
+    _reducedDofIds.resize(NumDofs());
+  for(int i = 0; i<NumDofs(); i++)
+    _reducedDofIds[i] = i;
+  //leaving a tag equal to -(i+1) where i is the constraint number on constrained dofs
+  for(int i = 0; i<_constraints.size(); i++)
+    for(int j = 0; j<Dim; j++)
+      if(_constraints.at(i).locked[j])
+        for(auto nodeId: _constraints.nodeIds)
+          _reducedDofIds[Dim*nodeId+j] = -(i+1);
+  //filling in the other dofs
+  int dofId = 0;
+  for(int i = 0; i<NumDofs(); i++)
+    if(_reducedDofIds[i] >= 0)
+      _reducedDofIds[i] = dofId++;
+  _numFreeDofs = dofId; 
+}
+
+template <typename _Scalar, int _Dim>
+std::vector<int> FEM<_Scalar, _Dim>::GetElementReducedDofIds(int elementId) const {
+  std::vector<int> result;
+  for(int i = 0; i< GetElement(elementId).NumNodes(); )
+}
 
 //sets u at the nodes given a global vector u with all the displacements
 template <typename _Scalar, int _Dim>

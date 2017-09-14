@@ -100,8 +100,7 @@ TEST(miniElement, C3D20Rdouble)
     conn.push_back(i+1);
   double E = 5, nu = 0.3;
   mini::IsotropicLinear<double, 3> isoMat(E, nu);
-  mini::C3D20R<mini::IsotropicLinear<double, 3>> testEl(nodes, isoMat);
-  testEl.setConn(conn);
+  mini::C3D20R<mini::IsotropicLinear<double, 3>> testEl(nodes, conn, isoMat);
   //testing node access
   EXPECT_TRUE(allclose(Eigen::Matrix<double,  3, 1>::Zero(), testEl.Node(0).X));  
   EXPECT_TRUE(allclose(dummy.col(20), testEl.Node(19).X )); 
