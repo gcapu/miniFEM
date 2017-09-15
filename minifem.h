@@ -21,6 +21,7 @@ LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
 /----------------------------------------------------------------------------*/
+#pragma once
 
 #include <string>
 #include <vector>
@@ -121,17 +122,14 @@ template <typename _Scalar, int _Dim>
 class Element{
 public:
   typedef _Scalar Scalar;
-  enum { 
-    Dim = _Dim,
-    NumNodes = _Dim == 3 ? 20 : 8, //quadratic elements only. 
-    };
+  enum {Dim = _Dim};
   typedef Node<Scalar, Dim> NodeType;
   typedef IntegrationPoint<Scalar, Dim> IPType;
   typedef Eigen::Matrix<Scalar, Eigen::Dynamic, 1> VectorType;
   typedef Eigen::Matrix<Scalar, Eigen::Dynamic, Eigen::Dynamic> MatrixType;
 protected:
   const std::vector<NodeType>& _globalNodes; //reference to global node storage.
-  std::array<int, NumNodes> _connectivity;
+  std::vector<int> _connectivity;
 public:
   template<typename T>
   Element(const std::vector<NodeType>& nodes, const T& conn);
@@ -139,8 +137,11 @@ public:
   //storage
   std::vector<IPType> ips; //integration points
   //access to dof values and nodes
+  int NumNodes() const {return _connectivity.size();}
+  int NumDofs() const {return _connectivity.size() * Dim;}
   const NodeType& Node(int nodeNumber) const {return _globalNodes.at(Conn(nodeNumber));}
   int Conn(int nodeNumber) const {return _connectivity[nodeNumber];}
+  const std::vector<int>& Conn() const {return _connectivity;}
   //main functions
   virtual VectorType F() = 0;
   virtual VectorType LM() = 0;
@@ -371,7 +372,8 @@ template <typename T>
 Element<_Scalar, _Dim>::Element(const std::vector<NodeType>& nodes, const T& conn):
     _globalNodes(nodes)
   {
-  assert(conn.size() >= _connectivity.size());
+  if(_connectivity.size() != conn.size())
+    _connectivity.resize(conn.size());
   for(int i = 0; i<_connectivity.size(); i++) 
     _connectivity.at(i) = conn.at(i);
   }
@@ -380,11 +382,12 @@ Element<_Scalar, _Dim>::Element(const std::vector<NodeType>& nodes, const T& con
 
 template <typename MatType>
 template <typename T>
-C3D20R<MatType>::C3D20R(const std::vector<typename C3D20R<MatType>::NodeType>& nodes,
+C3D20R<MatType>::C3D20R(const std::vector<NodeType>& nodes,
                         const T& conn, const MatType& mat):
     Base(nodes, conn), _mat(mat)
   {
   EIGEN_STATIC_ASSERT(MatType::Dim == 3, YOU_MADE_A_PROGRAMMING_MISTAKE);
+  assert(conn.size() == NumNodes);
   IntegrationRule IR;
   for(int i = 0; i < IntegrationRule::NumPoints; i++)
     this->ips.emplace_back(IR.point(i), IR.weight(i));
@@ -496,18 +499,16 @@ template <typename MatType>
 typename C3D20R<MatType>::VectorType C3D20R<MatType>::F() {
   //storage for the force
   VectorType fi = VectorType::Zero(NumDofs);
-  Eigen::Map<Eigen::Matrix<double,NumNodes,Dim,Eigen::RowMajor>> Fi(fi.data());
+  Eigen::Map<Eigen::Matrix<Scalar,NumNodes,Dim,Eigen::RowMajor>> Fi(fi.data());
   //obtaining uIi. Note that this is the transpose of belytschkos notation
-  Eigen::Matrix<Scalar, Dim, NumNodes> u;
+  Eigen::Matrix<Scalar, Dim, NumNodes> allu;
   for(int i = 0; i<NumNodes; i++)
-    u.col(i) = this->Node(i).u;
-  Eigen::Matrix3d H; //displacement gradient (not the deformation gradient)
+    allu.col(i) = this->Node(i).u;
   Eigen::Matrix<Scalar, Dim, NumNodes> allX;
   for(int i = 0; i<NumNodes; i++)
     allX.col(i) = this->Node(i).X;
   for (auto& ip: this->ips)
     {
-    Eigen::Matrix<Scalar, NumNodes, Dim> dhdX;
     Eigen::Matrix<Scalar, NumNodes, Dim> dhde = _dhde(ip.natCoords);
     // F0e is the deformation gradient F^0_\psi between the material coords and natural coords
     Eigen::Matrix<Scalar, Dim, Dim> F0e = allX * dhde; 
@@ -515,8 +516,8 @@ typename C3D20R<MatType>::VectorType C3D20R<MatType>::F() {
     ip.detj = F0e.determinant(); 
     //dhdX is called B^0_{Ij} by belytschko. (actually it's the transpose of this one)
     //while dhde are the same in all elements, that is not the case for dhdX.
-    dhdX.noalias() = dhde * F0e.inverse(); //up to (including) this line everything could be precalculated
-    H.noalias() = u*dhdX; //definition in Belytschko
+    Eigen::Matrix<Scalar, NumNodes, Dim> dhdX = dhde * F0e.inverse(); //up to (including) this line everything could be precalculated
+    Eigen::Matrix<Scalar, Dim, Dim> H = allu * dhdX; ////displacement gradient (not the deformation gradient)
     ip.strain.noalias() = .5*(H + H.transpose() + H*H.transpose()); //E
     ip.stress = _mat.Stress(ip.strain); //PK2
     Fi.noalias() += ip.detj * ip.weight * dhdX * ip.stress * (H.transpose() + Eigen::Matrix<Scalar, 3, 3>::Identity());
@@ -527,22 +528,19 @@ typename C3D20R<MatType>::VectorType C3D20R<MatType>::F() {
 
 template <typename MatType>
 typename C3D20R<MatType>::MatrixType C3D20R<MatType>::K() {
-  //W!!! TODO: add the geometric part of the stiffness. 
-  
   //storage for the stiffness matrix
   MatrixType k = MatrixType::Zero(NumDofs, NumDofs);
-  Eigen::Matrix<double, 6, NumDofs> B; B.setZero(); //W! hardcoded number
+  Eigen::Matrix<Scalar, 6, NumDofs> B; B.setZero(); //W! hardcoded number
   // W! repeated code with F() here:->
   Eigen::Matrix<Scalar, Dim, NumNodes> allX;
-  Eigen::Matrix<Scalar, Dim, NumNodes> allx;
+  Eigen::Matrix<Scalar, Dim, NumNodes> allu;
   for(int i = 0; i<NumNodes; i++)
     allX.col(i) = this->Node(i).X;
   for(int i = 0; i<NumNodes; i++)
-    allx.col(i) = this->Node(i).getx();
+    allu.col(i) = this->Node(i).u;
   for(int i = 0; i< this->ips.size(); i++) 
     {  
     typename Base::IPType& ip = this->ips.at(i);
-    Eigen::Matrix<Scalar, NumNodes, Dim> dhdX;
     Eigen::Matrix<Scalar, NumNodes, Dim> dhde = _dhde(ip.natCoords);
     // F0e is the deformation gradient F^0_\psi between the material coords and natural coords
     Eigen::Matrix<Scalar, Dim, Dim> F0e = allX * dhde; 
@@ -550,23 +548,31 @@ typename C3D20R<MatType>::MatrixType C3D20R<MatType>::K() {
     ip.detj = F0e.determinant(); 
     //dhdX is called B^0_{Ij} by belytschko. (actually it's the transpose of this one)
     //while dhde are the same in all elements, that is not the case for dhdX.
-    dhdX.noalias() = dhde * F0e.inverse(); //up to (including) this line everything could be precalculated
-    Eigen::Matrix<Scalar,Dim, Dim> F = allx*dhdX; //definition in Belytschko
+    Eigen::Matrix<Scalar, NumNodes, Dim> dhdX = dhde * F0e.inverse(); //up to (including) this line everything could be precalculated
+    Eigen::Matrix<Scalar, Dim, Dim> H = allu * dhdX; ////displacement gradient (not the deformation gradient)
+    Eigen::Matrix<Scalar,Dim, Dim> F = H + Eigen::Matrix<Scalar, Dim, Dim>::Identity();
+    ip.strain.noalias() = .5*(H + H.transpose() + H*H.transpose()); //E
+    ip.stress = _mat.Stress(ip.strain); //PK2
      // <--:repeated code up to here
     // Maybe I should just do what belytschko recommends in page 214 and write the individual terms.
-    for(int i = 0;i < NumNodes; ++i) 
+    for(int j = 0;j < NumNodes; ++j) 
       {
-      B.template block<3,3>(0,i*Dim) = dhdX.row(i).asDiagonal() * F;
-      B.template block<1,3>(3,i*Dim) = dhdX(i,1) * F.col(3).transpose() + dhdX(i,2) * F.col(2).transpose();
-      B.template block<1,3>(4,i*Dim) = dhdX(i,0) * F.col(3).transpose() + dhdX(i,2) * F.col(1).transpose();
-      B.template block<1,3>(5,i*Dim) = dhdX(i,0) * F.col(2).transpose() + dhdX(i,1) * F.col(1).transpose();
+      B.template block<3,3>(0,j*Dim) = dhdX.row(i).asDiagonal() * F;
+      B.template block<1,3>(3,j*Dim) = dhdX(j,1) * F.col(3).transpose() + dhdX(j,2) * F.col(2).transpose();
+      B.template block<1,3>(4,j*Dim) = dhdX(j,0) * F.col(3).transpose() + dhdX(j,2) * F.col(1).transpose();
+      B.template block<1,3>(5,j*Dim) = dhdX(j,0) * F.col(2).transpose() + dhdX(j,1) * F.col(1).transpose();
       }
     // Using the next function is actually slow. 
-    Eigen::Matrix<double,6,6> Cm = _mat.Stiffness(); 
+    Eigen::Matrix<double,6,6> Cm = _mat.Stiffness();  
+    /*/Todo: veify if I need to do this W!!!
     Cm(3,3) /=2; //Given this definition of B we need the C that relates sigma and gamma    
     Cm(4,4) /=2; //Given this definition of B we need the C that relates sigma and gamma    
-    Cm(5,5) /=2; //Given this definition of B we need the C that relates sigma and gamma    
-    k+=B.transpose() * Cm * B * ip.detj * ip.weight; 
+    Cm(5,5) /=2; //Given this definition of B we need the C that relates sigma and gamma    */
+    k+=B.transpose() * Cm * B * ip.detj * ip.weight;
+    Eigen::Matrix<Scalar, NumNodes, NumNodes> Kgeo = dhdX * ip.stress * dhdX.transpose() *ip.detj * ip.weight;
+    for(int j = 0; j<NumNodes; j++)
+      for(int l = 0; l<NumNodes; l++) //W! choice for indices is less than ideal given that k is a matrix
+        k.template block<Dim, Dim>(Dim*j, Dim*l) += Kgeo(j,l) * Eigen::Matrix<Scalar, Dim, Dim>::Identity(); 
     }
   return k;
   }
@@ -616,7 +622,7 @@ void FEM<_Scalar, _Dim>::UpdateReduced(){
   for(int i = 0; i<_constraints.size(); i++)
     for(int j = 0; j<Dim; j++)
       if(_constraints.at(i).locked[j])
-        for(auto nodeId: _constraints.nodeIds)
+        for(auto nodeId: _constraints.at(i).nodeIds)
           _reducedDofIds[Dim*nodeId+j] = -(i+1);
   //filling in the other dofs
   int dofId = 0;
@@ -626,10 +632,14 @@ void FEM<_Scalar, _Dim>::UpdateReduced(){
   _numFreeDofs = dofId; 
 }
 
+//Private method! gives the reduced dofs for the element
 template <typename _Scalar, int _Dim>
 std::vector<int> FEM<_Scalar, _Dim>::GetElementReducedDofIds(int elementId) const {
   std::vector<int> result;
-  for(int i = 0; i< GetElement(elementId).NumNodes(); )
+  for(auto nodeId: Element(elementId).Conn())
+    for(int j = 0; j < Dim; j++)
+      result.push_back(_reducedDofIds.at(nodeId*Dim+j));
+  return result;
 }
 
 //sets u at the nodes given a global vector u with all the displacements
@@ -641,47 +651,59 @@ void FEM<_Scalar, _Dim>::setu(const VectorType& u){
 
 template <typename _Scalar, int _Dim>
 typename FEM<_Scalar, _Dim>::VectorType FEM<_Scalar, _Dim>::F () {
-  int numDofs = Dim * _nodes.size();
-  VectorType f = VectorType::Zero(numDofs);
-  for(auto& elementPtr: _elementPtrs) 
+  VectorType f = VectorType::Zero(NumFreeDofs());
+  for(int i = 0; i < NumElements(); i++) 
     {
-    VectorType fel = elementPtr->F();
-    for(int i = 0; i<fel.size(); i++)
-      //if(dofId != dummy_dof)
-      f(elementPtr->Dof(i)) += fel(i);
+    typename ElementType::VectorType fel = _elementPtrs.at(i)->F();
+    std::vector<int> dofs = GetElementReducedDofIds(i);
+    assert(fel.size() == dofs.size());
+    for(int j = 0; j<dofs.size(); j++)
+      if(dofs[j] >= 0)
+        f(dofs[j]) += fel(j);
     }
+  for(const auto& load: _loads)
+    for(const auto& nodeId: load.nodeIds)
+      for(int i = 0; i < Dim; i++)
+        {
+        int dofId = _reducedDofIds[nodeId*Dim+i];
+        if(dofId >= 0)
+          f(dofId) += load.force[i];
+        }
   return f;
   }
 
 template <typename _Scalar, int _Dim>
 typename FEM<_Scalar, _Dim>::VectorType FEM<_Scalar, _Dim>::LM () {
-  int numDofs = Dim * _nodes.size();
-  VectorType lm = VectorType::Zero(numDofs);
-  for(auto& elementPtr: _elementPtrs)
+  VectorType lm = VectorType::Zero(NumFreeDofs());
+  for(int i = 0; i < NumElements(); i++) 
     {
-    VectorType lmel = elementPtr->UpdateLM();
-    for(int i = 0; i<lmel.size(); i++)
-      //if(dofId != dummy_dof)
-      lm(elementPtr->Dof(i)) += lm(i);
+    typename ElementType::VectorType lmel = _elementPtrs.at(i)->UpdateLM();
+    std::vector<int> dofs = GetElementReducedDofIds(i);
+    assert(lmel.size() == dofs.size());
+    for(int j = 0; j<dofs.size(); j++)
+      if(dofs[j] >= 0)
+        lm(dofs[j]) += lm(j);
     }
   return lm;
   }
 
 template <typename _Scalar, int _Dim>
 typename FEM<_Scalar, _Dim>::MatrixType FEM<_Scalar, _Dim>::K () {
-  MatrixType k;
+  MatrixType k(NumFreeDofs(), NumFreeDofs());
   typedef Eigen::Triplet<Scalar> Trip;
   std::vector<Trip> tripletList;
   //size_t estimation_of_entries = elementPtrs.size() * elementPtrs.at(0)->ndofs() * elementPtrs.at(0)->ndofs();
   //tripletList.reserve(estimation_of_entries);
-  for(auto& elementPtr: _elementPtrs)
+  for(int i = 0; i < NumElements(); i++) 
     {
-    typename ElementType::MatrixType elk = elementPtr->K();
-    for(int i = 0; i<elk.rows(); i++) 
-      //if(id1 != dummy_dof)
-      for(int j = 0; j<elk.cols(); j++) 
-        //if (id2 != dummy_dof)
-        tripletList.push_back(Trip(elementPtr->Dof(i), elementPtr->Dof(j), elk(i, j)));
+    typename ElementType::MatrixType kel = _elementPtrs.at(i)->K();
+    std::vector<int> dofs = GetElementReducedDofIds(i);
+    assert(kel.size() == dofs.size());
+    for(int j = 0; j<dofs.size(); j++)
+      if(dofs[j] >= 0)
+        for(int k = 0; k<dofs.size(); k++) 
+          if(dofs[k] >= 0 && kel(j,k) > Eigen::NumTraits<Scalar>::dummy_precision())
+            tripletList.push_back(Trip(dofs[j], dofs[k], kel(j, k)));
     }
   k.setFromTriplets(tripletList.begin(), tripletList.end());
   return k;
@@ -689,22 +711,32 @@ typename FEM<_Scalar, _Dim>::MatrixType FEM<_Scalar, _Dim>::K () {
 
 template <typename _Scalar, int _Dim>
 typename FEM<_Scalar, _Dim>::MatrixType FEM<_Scalar, _Dim>::M () {
-  MatrixType m;
+  MatrixType m(NumFreeDofs(), NumFreeDofs());
   typedef Eigen::Triplet<Scalar> Trip;
   std::vector<Trip> tripletList;
-  //m.setZero(); <- should I?
-  for(auto& elementPtr: _elementPtrs) 
+  for(int i = 0; i < NumElements(); i++) 
     {
-    typename ElementType::MatrixType elm = elementPtr->M();
-    for(int i = 0; i<elm.rows(); i++)
-      //if(id1 != dummy_dof)
-      for(int j = 0; j<elm.cols(); j++)
-        //if(id2 != dummy_dof)
-        tripletList.push_back(Trip(elementPtr->Dof(i), elementPtr->Dof(j), elm(i, j)));
+    typename ElementType::MatrixType mel = _elementPtrs.at(i)->M();
+    std::vector<int> dofs = GetElementReducedDofIds(i);
+    assert(mel.size() == dofs.size());
+    for(int j = 0; j<dofs.size(); j++)
+      if(dofs[j] >= 0)
+        for(int k = 0; k<dofs.size(); k++) 
+          if(dofs[k] >= 0 && mel(j,k) > Eigen::NumTraits<Scalar>::dummy_precision())
+            tripletList.push_back(Trip(dofs[j], dofs[k], mel(j, k)));
     }
   m.setFromTriplets(tripletList.begin(), tripletList.end()); 
   return m;
   }
+template <typename _Scalar, int _Dim>
+bool FEM<_Scalar, _Dim>::CreateConstraint(const ConstraintType& constraint){
+  _constraints.push_back(constraint);
+  UpdateReduced();
+}
+template <typename _Scalar, int _Dim>
+bool FEM<_Scalar, _Dim>::CreateLoad(const LoadType& load){
+  _loads.push_back(load);
+}
 
 
 //This function can read the mesh from an Abaqus input file. It's a very 
@@ -807,6 +839,7 @@ bool FEM<_Scalar, _Dim>::ReadAbaqusInp(const std::string& filename, const MatTyp
       tempEls[i][j] -= 1;
     _elementPtrs.emplace_back(new C3D20R<MatType>(_nodes, tempEls[i], mat));
     }
+  UpdateReduced();
   return true;
   }
 
