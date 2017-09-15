@@ -1,7 +1,7 @@
 #include "gtest/gtest.h"
 
 #include "minifem.h"
-/*
+
 // Helper 
 template<typename DerivedA, typename DerivedB>
 bool allclose2(const Eigen::DenseBase<DerivedA>& a,
@@ -77,4 +77,4 @@ TEST(miniFEM, patchC3D20Rdouble)
   EXPECT_NEAR(fy, area*S11*(d+1.)/1., 1e-10);
   EXPECT_NEAR(fx, area*S22, 1e-10);
   */
-//}*/
+}

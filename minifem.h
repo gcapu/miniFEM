@@ -40,7 +40,6 @@ namespace mini
 //----------------------------------------------------------------------------
 // Node
 //----------------------------------------------------------------------------
-
 template <typename _Scalar, int _Dim>
 struct Node{
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
@@ -112,6 +111,7 @@ public:
   VectorType point(int index) const { return points.col(index); }
   Scalar weight(int index = 0) const { return 1.; }
   };
+
 
 //----------------------------------------------------------------------------
 // Element
@@ -326,18 +326,20 @@ typename IsotropicLinear<_Scalar, _Dim>::MatrixType
 //Converts a string to int, float or double.
 template <typename T> T convert(const std::string& val);
 
-template <> int convert<int>(const std::string& val) {
+template <> inline int convert<int>(const std::string& val) {
   long temp = strtol(val.c_str(), NULL, 10);
   assert(temp <= INT_MAX);
   return static_cast<int>(temp) ;
 }
-template <> float convert<float>(const std::string& val) {
+template <> inline float convert<float>(const std::string& val) {
   return strtof(val.c_str(), NULL);
 }
-template <> double convert<double>(const std::string& val) {
+template <> inline double convert<double>(const std::string& val) {
   return strtod(val.c_str(), NULL);
 }
-bool strStartsWith(const std::string& str, const std::string& start){
+
+template <typename StringType>
+bool strStartsWith(const StringType& str, const StringType& start){
   if (start.size() <= str.size() && std::equal(start.begin(), start.end(), str.begin()))
     return true;
   else
@@ -564,10 +566,10 @@ typename C3D20R<MatType>::MatrixType C3D20R<MatType>::K() {
       }
     // Using the next function is actually slow. 
     Eigen::Matrix<double,6,6> Cm = _mat.Stiffness();  
-    /*/Todo: veify if I need to do this W!!!
-    Cm(3,3) /=2; //Given this definition of B we need the C that relates sigma and gamma    
-    Cm(4,4) /=2; //Given this definition of B we need the C that relates sigma and gamma    
-    Cm(5,5) /=2; //Given this definition of B we need the C that relates sigma and gamma    */
+    //Todo: veify if I need to do this W!!!
+    //Cm(3,3) /=2; //Given this definition of B we need the C that relates sigma and gamma    
+    //Cm(4,4) /=2; //Given this definition of B we need the C that relates sigma and gamma    
+    //Cm(5,5) /=2; //Given this definition of B we need the C that relates sigma and gamma    
     k+=B.transpose() * Cm * B * ip.detj * ip.weight;
     Eigen::Matrix<Scalar, NumNodes, NumNodes> Kgeo = dhdX * ip.stress * dhdX.transpose() *ip.detj * ip.weight;
     for(int j = 0; j<NumNodes; j++)
@@ -758,17 +760,17 @@ bool FEM<_Scalar, _Dim>::ReadAbaqusInp(const std::string& filename, const MatTyp
   std::string line;
   std::getline(inf, line);
   //Ignore lines until a node command
-  while (!strStartsWith(line, "*Node"))
+  while (!strStartsWith<std::string>(line, "*Node"))
     std::getline(inf, line);
   //Read the first node and check if file is invalid
   std::getline(inf, line);
-  if(strStartsWith(line, "*"))
+  if(strStartsWith<std::string>(line, "*"))
     {
     std::cerr << "Warning: Input file contains a command when node was expected." << std::endl;
     return false;
     }
   //get nodes while line is not a command
-  while(!strStartsWith(line, "*"))
+  while(!strStartsWith<std::string>(line, "*"))
     {
     tempNodes.push_back(std::vector<Scalar>()); 
     tokenize(tempNodes.back(), line,1);
@@ -782,17 +784,17 @@ bool FEM<_Scalar, _Dim>::ReadAbaqusInp(const std::string& filename, const MatTyp
       return false;
       }
   //Ignore lines until an Element command
-  while (!strStartsWith(line, "*Element"))
+  while (!strStartsWith<std::string>(line, "*Element"))
     std::getline(inf, line);
   //Read the first Element and check if file is invalid
   std::getline(inf, line);
-  if (strStartsWith(line, "*"))
+  if (strStartsWith<std::string>(line, "*"))
     {
     std::cerr << "Warning: Input file contains a command when element was expected." << std::endl;
     return false;
     }
   //get Elements while line is not a command
-  while (!strStartsWith(line, "*"))
+  while (!strStartsWith<std::string>(line, "*"))
     {
     tempEls.push_back(std::vector<int>());
     bool endsWithComma = tokenize(tempEls.back(), line, 1);
@@ -842,6 +844,5 @@ bool FEM<_Scalar, _Dim>::ReadAbaqusInp(const std::string& filename, const MatTyp
   UpdateReduced();
   return true;
   }
-
 
 } //namespace TC
